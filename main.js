@@ -1,40 +1,53 @@
 var request = require('request')
+  , _ = require('underscore')
+  , EventProxy = require('eventproxy').EventProxy
   , events = require('events')
   , util = require('util')
   , follow = require('follow')
   , formidable = require('formidable')
   , r = request.defaults({json:true})
   ;
-  
-function requests () {
+
+function requests (from, to, callback) {
+  console.log("Checking the source & target registry.");
   var args = Array.prototype.slice.call(arguments)
-    , cb = args.pop()
-    , results = []
-    , errors = []
+    , callback = args.pop()
     ;
-    
-  for (var i=0;i<args.length;i++) {
-    (function (i) {
-      r(args[i], function (e, resp, body) {
-        if (e) errors[i] = e
-        else if (resp.statusCode !== 200) errors[i] = new Error("status is not 200.")
-        results.push([i, body])
-        if (results.length === args.length) {
-          var fullresults = [errors.length ? errors : null]
-          results.forEach(function (res) {
-            fullresults[res[0] + 1] = res[1]
-          })
-          cb.apply(this, fullresults)
-        }
-      })
-    })(i)
-  }  
-  
+  var proxy = new EventProxy();
+  proxy.after("done", args.length, function (items) {
+    var errors = [], results = [];
+    items.forEach(function (val) {
+      errors[val[0]] = val[1];
+      results[val[0]] = val[2];
+    });
+    var error = _.all(errors, _.identity) ? errors : null;
+    var passInArgs = _.flatten([error, results]);
+    console.log(passInArgs);
+    console.log("Checked the source & target registry.");
+    callback.apply(null, passInArgs);
+  });
+
+  args.forEach(function (val, index) {
+    console.log("Requesting " + val + ".");
+    r(val, function (err, response, body) {
+      if (response.statusCode !== 200) {
+        err = new Error("status is not 200.")
+      }
+      proxy.fire("done", [index, err, body]);
+    });
+  });
 }
 
 function Replicator (options) {
-  for (i in options) this[i] = options[i]
-  // events.EventEmitter.prototype.call(this)
+  for (i in options) {
+    this[i] = options[i];
+  }
+  if (this.from[this.from.length - 1] !== '/') {
+    this.from += '/';
+  }
+  if (this.to[this.to.length - 1] !== '/') {
+    this.to += '/';
+  }
 }
 util.inherits(Replicator, events.EventEmitter)
 Replicator.prototype.pushDoc = function (id, rev, cb) {
@@ -71,73 +84,58 @@ Replicator.prototype.pushDoc = function (id, rev, cb) {
         console.log(resp.headers)
         // console.error(body)
       }
-    )
-    // form.parse(, 
-    //   function(err, fields, files) {
-    //     options.mutate(err, fields, files)
-    //   }
-    // )
-  
-    // 
-    // .pipe(request.put(options.to + id + '?new_edits=false&rev=' + rev, function (e, resp, b) {
-    //   if (e) {
-    //     options.emit("failed", e)
-    //     results[id] = {error:e}
-    //   } else if (resp.statusCode === 201) {
-    //     options.emit("pushed", resp, b)
-    //     results[id] = {rev:rev, success:true}
-    //   } else {
-    //     options.emit("failed", resp, b)
-    //     results[id] = {error:"status code is not 201.", resp:resp, body:b}
-    //   }
-    //   cb(e, resp b)
-    // }))
+    );
   }
-}
+};
 
-Replicator.prototype.push = function (cb) {
-  var options = this
-  if (options.from[options.from.length - 1] !== '/') options.from += '/'
-  if (options.to[options.to.length - 1] !== '/') options.to += '/'
-  requests(options.from, options.to, function (err, fromInfo, toInfo) {
-    if (err) throw err
-    options.fromInfo = fromInfo
-    options.toInfo = toInfo
-    
-    r(options.from + '_changes', function (e, resp, body) {
-      if (e) throw e
-      if (resp.statusCode !== 200) throw new Error("status is not 200.")
-      var byid = {}
-      options.since = body.results[body.results.length - 1].seq
+Replicator.prototype.push = function (callback) {
+  var self = this;
+  requests(self.from, self.to, function (err, fromInfo, toInfo) {
+    if (err) {
+      throw err;
+    }
+    self.fromInfo = fromInfo;
+    self.toInfo = toInfo;
+
+    console.log("Requesting " + self.from + '_changes' + ".");
+    r(self.from + '_changes', function (e, resp, body) {
+      if (e) {
+        throw e;
+      }
+      if (resp.statusCode !== 200) {
+        throw new Error("status is not 200.");
+      }
+      var byid = {};
+      //console.log(body);
+      self.since = body.results[body.results.length - 1].seq;
       body.results.forEach(function (change) {
-        byid[change.id] = change.changes.map(function (r) {return r.rev})
-      })
-      r.post({url:options.to + '_missing_revs', json:byid}, function (e, resp, body) {
+        byid[change.id] = change.changes.map(function (r) {
+          return r.rev;
+        });
+      });
+      console.log("Requesting " + self.to + '_missing_revs' + ".");
+      r.post({url: self.to + '_missing_revs', json: byid}, function (e, response, body) {
         var results = []
           , counter = 0
           ;
-        body = body.missing_revs
-        for (var id in body) {
-          (function (id) {
-            if (!id) return;
-            body[id].forEach(function (rev) {
-              counter++
-              options.pushDoc(id, rev, function (obj) {
-                results.push(obj)
-                if (obj.error) options.emit('failed', obj)
-                else options.emit('pushed', obj)
-                counter--
-                if (counter === 0) cb(results)
-              })
-              
-            })
-          })(id)
-        }
-        if (Object.keys(body).length === 0) cb({})
+        var proxy = new EventProxy();
+        var missingRevs = body.missing_revs;
+        proxy.after("done", Object.keys(missingRevs).length, callback);
+        _.map(missingRevs, function (val, key) {
+          if (!key) return;
+          val.forEach(function (rev) {
+            self.pushDoc(key, rev, function (obj) {
+              results.push(obj)
+              if (obj.error) self.emit('failed', obj)
+              else self.emit('pushed', obj);
+            });
+            
+          })
+        });
       })
     })
   })
-}
+};
 Replicator.prototype.continuous = function () {
   var options = this
   options.push(function () {
@@ -152,17 +150,17 @@ Replicator.prototype.continuous = function () {
     })
   })
 }
-  
 
-function replicate (from, to, cb) {
-  if (typeof from === 'object') var options = from
-  else {
+function replicate(from, to, callback) {
+  if (typeof from === 'object') {
+    var options = from;
+  } else {
     var options = {from:from, to:to}
   }
-  var rep = new Replicator(options)
-  rep.push(cb)
+  var rep = new Replicator(options);
+  rep.push(callback);
   return rep
 }
 
-module.exports = replicate
-replicate.Replicator = Replicator
+module.exports = replicate;
+replicate.Replicator = Replicator;
