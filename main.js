@@ -30,7 +30,7 @@ function requests (from, to, callback) {
   args.forEach(function (val, index) {
     console.log("Requesting " + val + ".");
     r(val, function (err, response, body) {
-      if (response.statusCode !== 200) {
+      if (response && response.statusCode !== 200) {
         err = new Error("status is not 200.")
       }
       proxy.fire("done", [index, err, body]);
@@ -49,12 +49,10 @@ function Replicator (options) {
     this.to += '/';
   }
 }
-util.inherits(Replicator, events.EventEmitter)
+util.inherits(Replicator, EventProxy);
 Replicator.prototype.pushDoc = function (id, rev, cb) {
-  var options = this
-    , headers = {'accept':"multipart/related,application/json"}
-    ;
-    
+  var options = this, headers = {'accept':"multipart/related,application/json"};
+
   if (!cb) cb = function () {}
 
   if (options.filter && options.filter(id, rev) === false) return cb({id:id, rev:rev, filter:false})
@@ -63,6 +61,7 @@ Replicator.prototype.pushDoc = function (id, rev, cb) {
     request
     .get({url: options.from + encodeURIComponent(id) + '?attachments=true&revs=true&rev=' + rev, headers:headers})
     .pipe(request.put(options.to + encodeURIComponent(id) + '?new_edits=false&rev=' + rev, function (e, resp, b) {
+      console.log("Pushed doc: " + id + ", rev: " + rev + ".");
       if (e) {
         cb({error:e, id:id, rev:rev, body:b}) 
       } else if (resp.statusCode > 199 && resp.statusCode < 300) {
@@ -115,22 +114,22 @@ Replicator.prototype.push = function (callback) {
       });
       console.log("Requesting " + self.to + '_missing_revs' + ".");
       r.post({url: self.to + '_missing_revs', json: byid}, function (e, response, body) {
-        var results = []
-          , counter = 0
-          ;
         var proxy = new EventProxy();
         var missingRevs = body.missing_revs;
         proxy.after("done", Object.keys(missingRevs).length, callback);
+        var i = 0;
         _.map(missingRevs, function (val, key) {
           if (!key) return;
+          i = i + 1;
           val.forEach(function (rev) {
-            self.pushDoc(key, rev, function (obj) {
-              results.push(obj)
-              if (obj.error) self.emit('failed', obj)
-              else self.emit('pushed', obj);
-            });
-            
-          })
+            setTimeout(function (key, rev) {
+              console.log("Push Doc for " + key + ", rev: " + rev + ".");
+              self.pushDoc(key, rev, function (obj) {
+                if (obj.error) self.emit('failed', obj)
+                else self.emit('pushed', obj);
+              });
+            }, 60000 * i, key, rev);
+          });
         });
       })
     })
@@ -145,10 +144,10 @@ Replicator.prototype.continuous = function () {
         options.pushDoc(change.id, o.rev, function (obj) {
           if (obj.error) options.emit('failed', obj)
           else options.emit('pushed', obj)
-        })
-      })
-    })
-  })
+        });
+      });
+    });
+  });
 }
 
 function replicate(from, to, callback) {
