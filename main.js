@@ -3,7 +3,6 @@ var request = require('request')
   , EventProxy = require('eventproxy').EventProxy
   , events = require('events')
   , util = require('util')
-  , follow = require('follow')
   , formidable = require('formidable')
   , r = request.defaults({json:true})
   ;
@@ -135,20 +134,6 @@ Replicator.prototype.push = function (callback) {
     })
   })
 };
-Replicator.prototype.continuous = function () {
-  var options = this
-  options.push(function () {
-    follow({db:options.from, since:options.since}, function (e, change) {
-      if (e) return
-      change.changes.forEach(function (o) {
-        options.pushDoc(change.id, o.rev, function (obj) {
-          if (obj.error) options.emit('failed', obj)
-          else options.emit('pushed', obj)
-        });
-      });
-    });
-  });
-}
 
 function replicate(from, to, callback) {
   if (typeof from === 'object') {
